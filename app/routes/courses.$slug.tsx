@@ -1,6 +1,7 @@
-import { useEffect } from "react";
-import { Link, useSearchParams } from "react-router";
+import { useEffect, useState } from "react";
+import { Link, useFetcher, useSearchParams } from "react-router";
 import { toast } from "sonner";
+import { z } from "zod";
 import type { Route } from "./+types/courses.$slug";
 import {
   getCourseBySlug,
@@ -8,6 +9,12 @@ import {
   getLessonCountForCourse,
 } from "~/services/courseService";
 import { isUserEnrolled } from "~/services/enrollmentService";
+import {
+  getCourseRatingStats,
+  getUserReview,
+  upsertReview,
+} from "~/services/reviewService";
+import { parseFormData } from "~/lib/validation";
 import {
   calculateProgress,
   getLessonProgressForCourse,
@@ -37,6 +44,8 @@ import {
 } from "lucide-react";
 import { CourseImage } from "~/components/course-image";
 import { UserAvatar } from "~/components/user-avatar";
+import { CourseRating } from "~/components/star-rating";
+import { Star } from "lucide-react";
 import { data, isRouteErrorResponse } from "react-router";
 import { formatDuration, formatPrice } from "~/lib/utils";
 import { renderMarkdown } from "~/lib/markdown.server";
@@ -67,13 +76,17 @@ export async function loader({ params, request }: Route.LoaderArgs) {
   const lessonCount = getLessonCountForCourse(course.id);
   const currentUserId = await getCurrentUserId(request);
 
+  const ratingStats = getCourseRatingStats(course.id);
+
   let enrolled = false;
   let progress = 0;
   let lessonProgressMap: Record<number, string> = {};
   let nextLessonId: number | null = null;
+  let userRating: number | null = null;
 
   if (currentUserId) {
     enrolled = isUserEnrolled(currentUserId, course.id);
+    userRating = getUserReview(currentUserId, course.id)?.rating ?? null;
 
     if (enrolled) {
       progress = calculateProgress(currentUserId, course.id, false, false);
@@ -113,10 +126,42 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     currentUserId,
     pppPrice,
     tierInfo,
+    ratingAverage: ratingStats.average,
+    ratingCount: ratingStats.count,
+    userRating,
   };
 }
 
-// No action — enrollment is handled via the purchase confirmation page
+const ratingSchema = z.object({
+  rating: z.coerce.number().int().min(1).max(5),
+});
+
+export async function action({ params, request }: Route.ActionArgs) {
+  const currentUserId = await getCurrentUserId(request);
+
+  if (!currentUserId) {
+    throw data("You must be signed in to rate a course.", { status: 401 });
+  }
+
+  const course = getCourseBySlug(params.slug);
+  if (!course) {
+    throw data("Course not found", { status: 404 });
+  }
+
+  if (!isUserEnrolled(currentUserId, course.id)) {
+    throw data("You must be enrolled to rate this course.", { status: 403 });
+  }
+
+  const formData = await request.formData();
+  const parsed = parseFormData(formData, ratingSchema);
+
+  if (!parsed.success) {
+    return data({ errors: parsed.errors }, { status: 400 });
+  }
+
+  upsertReview(currentUserId, course.id, parsed.data.rating);
+  return { success: true };
+}
 
 export function HydrateFallback() {
   return (
@@ -181,6 +226,9 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
     currentUserId,
     pppPrice,
     tierInfo,
+    ratingAverage,
+    ratingCount,
+    userRating,
   } = loaderData;
   const isInstructor = currentUserId === course.instructorId;
   const [searchParams, setSearchParams] = useSearchParams();
@@ -310,6 +358,9 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
             />
             {course.instructorName}
           </span>
+          {ratingCount > 0 && (
+            <CourseRating average={ratingAverage} count={ratingCount} />
+          )}
           <span className="flex items-center gap-1">
             <BookOpen className="size-4" />
             {lessonCount} lessons
@@ -413,6 +464,7 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
                       Buy More Seats
                     </Button>
                   </Link>
+                  <RateCourse userRating={userRating} />
                 </>
               ) : (
                 enrollButton
@@ -446,6 +498,64 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
           </Card>
         </div>
       </div>
+    </div>
+  );
+}
+
+function RateCourse({ userRating }: { userRating: number | null }) {
+  const fetcher = useFetcher<{ success?: boolean; errors?: Record<string, string> }>();
+  const [hovered, setHovered] = useState<number | null>(null);
+
+  // Reflect the saved rating optimistically while a submit is in flight.
+  const submittedRating = fetcher.formData
+    ? Number(fetcher.formData.get("rating"))
+    : null;
+  const selected = submittedRating ?? userRating ?? 0;
+  const display = hovered ?? selected;
+
+  useEffect(() => {
+    if (fetcher.state === "idle" && fetcher.data?.success) {
+      toast.success("Thanks for rating this course!");
+    }
+    if (fetcher.state === "idle" && fetcher.data?.errors) {
+      toast.error("Could not save your rating. Please try again.");
+    }
+  }, [fetcher.state, fetcher.data]);
+
+  return (
+    <div className="border-t pt-4">
+      <p className="mb-2 text-sm font-medium">
+        {selected > 0 ? "Your rating" : "Rate this course"}
+      </p>
+      <fetcher.Form
+        method="post"
+        className="flex items-center gap-1"
+        onMouseLeave={() => setHovered(null)}
+      >
+        {Array.from({ length: 5 }).map((_, i) => {
+          const value = i + 1;
+          return (
+            <button
+              key={value}
+              type="submit"
+              name="rating"
+              value={value}
+              disabled={fetcher.state !== "idle"}
+              onMouseEnter={() => setHovered(value)}
+              className="rounded p-0.5 text-amber-400 transition-transform hover:scale-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+              aria-label={`Rate ${value} ${value === 1 ? "star" : "stars"}`}
+            >
+              <Star
+                className={
+                  value <= display
+                    ? "size-6 fill-amber-400 text-amber-400"
+                    : "size-6 text-muted-foreground/30"
+                }
+              />
+            </button>
+          );
+        })}
+      </fetcher.Form>
     </div>
   );
 }
