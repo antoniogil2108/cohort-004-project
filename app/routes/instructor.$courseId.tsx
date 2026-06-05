@@ -35,6 +35,18 @@ import {
 } from "~/services/lessonService";
 import { getEnrollmentCountForCourse, getCourseEnrolledStudents } from "~/services/enrollmentService";
 import { calculateProgress } from "~/services/progressService";
+import {
+  getRevenue,
+  getSeatsSold,
+  getMonthlyRevenueTrend,
+  getTopCountries,
+  getCompletionRate,
+  getAverageProgress,
+  getProgressDistribution,
+  getDropOffFunnel,
+  getMonthlyEnrollmentTrend,
+  getRatingDistribution,
+} from "~/services/analyticsService";
 import { getQuizByLessonId, getBestAttempt } from "~/services/quizService";
 import { getCurrentUserId } from "~/lib/session";
 import { getUserById } from "~/services/userService";
@@ -69,6 +81,8 @@ import {
   Award,
   Globe,
   FileText,
+  BarChart3,
+  Star,
 } from "lucide-react";
 import { data, isRouteErrorResponse } from "react-router";
 import { z } from "zod";
@@ -185,7 +199,30 @@ export async function loader({ params, request }: Route.LoaderArgs) {
 
   const quizCount = lessonQuizzes.length;
 
-  return { course, lessonCount, enrollmentCount, students, quizCount };
+  // Analytics: one friendly empty state for the whole tab when nobody has
+  // enrolled (drafts behave the same). Otherwise every section gets data and
+  // degrades locally. The revenue/sales numbers are only meaningful for paid
+  // courses, so they're gated on price.
+  const isPaidCourse = course.price > 0;
+  const analytics =
+    enrollmentCount === 0
+      ? null
+      : {
+          isPaidCourse,
+          enrollments: enrollmentCount,
+          revenue: getRevenue(courseId),
+          seatsSold: getSeatsSold(courseId),
+          completionRate: getCompletionRate(courseId),
+          averageProgress: getAverageProgress(courseId),
+          progressDistribution: getProgressDistribution(courseId),
+          dropOffFunnel: getDropOffFunnel(courseId),
+          enrollmentTrend: getMonthlyEnrollmentTrend(courseId),
+          revenueTrend: isPaidCourse ? getMonthlyRevenueTrend(courseId) : [],
+          topCountries: isPaidCourse ? getTopCountries(courseId) : [],
+          ratings: getRatingDistribution(courseId),
+        };
+
+  return { course, lessonCount, enrollmentCount, students, quizCount, analytics };
 }
 
 export async function action({ params, request }: Route.ActionArgs) {
@@ -981,10 +1018,341 @@ function statusBadgeColor(status: string) {
   }
 }
 
+type AnalyticsData = NonNullable<
+  Awaited<ReturnType<typeof loader>>["analytics"]
+>;
+
+function formatTrendMonth(key: string): string {
+  const [year, month] = key.split("-").map(Number);
+  return new Date(Date.UTC(year, month - 1, 1)).toLocaleDateString("en-US", {
+    month: "short",
+    year: "2-digit",
+    timeZone: "UTC",
+  });
+}
+
+function AnalyticsStat({ label, value }: { label: string; value: string }) {
+  return (
+    <Card>
+      <CardContent className="p-4">
+        <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+          {label}
+        </p>
+        <p className="mt-1 text-2xl font-bold tabular-nums">{value}</p>
+      </CardContent>
+    </Card>
+  );
+}
+
+// Hand-rolled horizontal bar following the progress-bar div idiom used in the
+// Students tab. No charting dependency.
+function AnalyticsBar({
+  label,
+  value,
+  max,
+  display,
+  highlight = false,
+}: {
+  label: string;
+  value: number;
+  max: number;
+  display: string;
+  highlight?: boolean;
+}) {
+  const widthPct = max > 0 ? Math.round((value / max) * 100) : 0;
+  return (
+    <div className="flex items-center gap-3">
+      <span className="w-24 shrink-0 truncate text-right text-xs text-muted-foreground">
+        {label}
+      </span>
+      <div className="h-2.5 flex-1 rounded-full bg-muted">
+        <div
+          className={`h-2.5 rounded-full transition-all ${
+            highlight ? "bg-destructive" : "bg-primary"
+          }`}
+          style={{ width: `${widthPct}%` }}
+        />
+      </div>
+      <span className="w-16 shrink-0 text-right text-xs font-medium tabular-nums">
+        {display}
+      </span>
+    </div>
+  );
+}
+
+function AnalyticsTab({ analytics }: { analytics: AnalyticsData | null }) {
+  // Top-level guard: a course nobody has enrolled in (incl. drafts) gets one
+  // friendly empty state for the whole tab instead of a wall of zeros.
+  if (!analytics) {
+    return (
+      <Card>
+        <CardContent className="py-12 text-center">
+          <BarChart3 className="mx-auto mb-3 size-8 text-muted-foreground/50" />
+          <p className="text-muted-foreground">
+            No analytics yet. Once students enrol, you'll see sales, completion,
+            and engagement here.
+          </p>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  const {
+    isPaidCourse,
+    enrollments,
+    revenue,
+    seatsSold,
+    completionRate,
+    averageProgress,
+    progressDistribution,
+    dropOffFunnel,
+    enrollmentTrend,
+    revenueTrend,
+    topCountries,
+    ratings,
+  } = analytics;
+
+  const enrollMax = Math.max(1, ...enrollmentTrend.map((m) => m.value));
+  const revenueMax = Math.max(1, ...revenueTrend.map((m) => m.value));
+  const distMax = Math.max(1, ...progressDistribution.map((b) => b.value));
+  const countryMax = Math.max(1, ...topCountries.map((c) => c.value));
+  const starMax = Math.max(1, ...ratings.stars.map((s) => s.value));
+
+  return (
+    <div className="space-y-6">
+      {/* KPI summary row */}
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
+        {isPaidCourse && (
+          <AnalyticsStat label="Revenue" value={formatPrice(revenue)} />
+        )}
+        <AnalyticsStat label="Seats Sold" value={String(seatsSold)} />
+        <AnalyticsStat label="Enrolments" value={String(enrollments)} />
+        <AnalyticsStat label="Completion" value={`${completionRate}%`} />
+        <AnalyticsStat
+          label="Avg Rating"
+          value={ratings.average === null ? "—" : ratings.average.toFixed(1)}
+        />
+      </div>
+
+      {/* Sales (paid courses only) */}
+      {isPaidCourse && (
+        <Card>
+          <CardHeader>
+            <h2 className="text-lg font-semibold">Sales</h2>
+          </CardHeader>
+          <CardContent className="space-y-6">
+            <div className="flex flex-wrap gap-8">
+              <div>
+                <p className="text-xs uppercase tracking-wider text-muted-foreground">
+                  Total revenue
+                </p>
+                <p className="mt-1 text-xl font-bold tabular-nums">
+                  {formatPrice(revenue)}
+                </p>
+              </div>
+              <div>
+                <p className="text-xs uppercase tracking-wider text-muted-foreground">
+                  Seats sold
+                </p>
+                <p className="mt-1 text-xl font-bold tabular-nums">
+                  {seatsSold}
+                </p>
+              </div>
+            </div>
+
+            <div>
+              <p className="mb-2 text-sm font-medium">Monthly revenue</p>
+              <div className="space-y-1.5">
+                {revenueTrend.map((m) => (
+                  <AnalyticsBar
+                    key={m.month}
+                    label={formatTrendMonth(m.month)}
+                    value={m.value}
+                    max={revenueMax}
+                    display={formatPrice(m.value)}
+                  />
+                ))}
+              </div>
+            </div>
+
+            {topCountries.length > 0 && (
+              <div>
+                <p className="mb-2 text-sm font-medium">Top countries</p>
+                <div className="space-y-1.5">
+                  {topCountries.map((c) => (
+                    <AnalyticsBar
+                      key={c.country}
+                      label={c.country}
+                      value={c.value}
+                      max={countryMax}
+                      display={String(c.value)}
+                    />
+                  ))}
+                </div>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Completion */}
+      <Card>
+        <CardHeader>
+          <h2 className="text-lg font-semibold">Completion</h2>
+        </CardHeader>
+        <CardContent className="space-y-6">
+          <div className="flex flex-wrap gap-8">
+            <div>
+              <p className="text-xs uppercase tracking-wider text-muted-foreground">
+                Completion rate
+              </p>
+              <p className="mt-1 text-xl font-bold tabular-nums">
+                {completionRate}%
+              </p>
+            </div>
+            <div>
+              <p className="text-xs uppercase tracking-wider text-muted-foreground">
+                Average progress
+              </p>
+              <p className="mt-1 text-xl font-bold tabular-nums">
+                {averageProgress}%
+              </p>
+            </div>
+          </div>
+
+          <div>
+            <p className="mb-2 text-sm font-medium">Progress distribution</p>
+            <div className="space-y-1.5">
+              {progressDistribution.map((b) => (
+                <AnalyticsBar
+                  key={b.bucket}
+                  label={b.bucket}
+                  value={b.value}
+                  max={distMax}
+                  display={String(b.value)}
+                />
+              ))}
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Lesson drop-off funnel */}
+      <Card>
+        <CardHeader>
+          <h2 className="text-lg font-semibold">Lesson drop-off</h2>
+          <p className="text-sm text-muted-foreground">
+            Share of enrolees who opened each lesson, in course order.
+          </p>
+        </CardHeader>
+        <CardContent>
+          {dropOffFunnel.length === 0 ? (
+            <p className="py-4 text-center text-sm text-muted-foreground">
+              Add lessons to see where students drop off.
+            </p>
+          ) : (
+            <div className="space-y-3">
+              {dropOffFunnel.map((lesson) => (
+                <div key={lesson.lessonId} className="space-y-1">
+                  <div className="flex items-center justify-between gap-2 text-xs">
+                    <span className="flex min-w-0 items-center gap-1.5">
+                      <span className="truncate">{lesson.title}</span>
+                      {lesson.isDropOffPoint && (
+                        <span className="shrink-0 rounded-full bg-destructive/10 px-1.5 py-0.5 text-[10px] font-medium text-destructive">
+                          biggest drop
+                        </span>
+                      )}
+                    </span>
+                    <span className="shrink-0 text-muted-foreground">
+                      {lesson.avgPctWatched}%
+                      {lesson.watchedApproximate ? "~" : ""} watched
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <div className="h-2.5 flex-1 rounded-full bg-muted">
+                      <div
+                        className={`h-2.5 rounded-full transition-all ${
+                          lesson.isDropOffPoint ? "bg-destructive" : "bg-primary"
+                        }`}
+                        style={{ width: `${lesson.reachPct}%` }}
+                      />
+                    </div>
+                    <span className="w-10 shrink-0 text-right text-xs font-medium tabular-nums">
+                      {lesson.reachPct}%
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Enrolment trend */}
+      <Card>
+        <CardHeader>
+          <h2 className="text-lg font-semibold">Enrolment trend</h2>
+        </CardHeader>
+        <CardContent>
+          <div className="space-y-1.5">
+            {enrollmentTrend.map((m) => (
+              <AnalyticsBar
+                key={m.month}
+                label={formatTrendMonth(m.month)}
+                value={m.value}
+                max={enrollMax}
+                display={String(m.value)}
+              />
+            ))}
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Ratings */}
+      <Card>
+        <CardHeader>
+          <h2 className="text-lg font-semibold">Ratings</h2>
+        </CardHeader>
+        <CardContent>
+          {ratings.count === 0 ? (
+            <p className="py-4 text-center text-sm text-muted-foreground">
+              No ratings yet.
+            </p>
+          ) : (
+            <div className="space-y-4">
+              <div className="flex items-center gap-2">
+                <Star className="size-5 fill-yellow-400 text-yellow-400" />
+                <span className="text-2xl font-bold tabular-nums">
+                  {ratings.average!.toFixed(1)}
+                </span>
+                <span className="text-sm text-muted-foreground">
+                  ({ratings.count} {ratings.count === 1 ? "review" : "reviews"})
+                </span>
+              </div>
+              <div className="space-y-1.5">
+                {[...ratings.stars].reverse().map((s) => (
+                  <AnalyticsBar
+                    key={s.rating}
+                    label={`${s.rating} ★`}
+                    value={s.value}
+                    max={starMax}
+                    display={String(s.value)}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
 export default function InstructorCourseEditor({
   loaderData,
 }: Route.ComponentProps) {
-  const { course, lessonCount, enrollmentCount, students, quizCount } = loaderData;
+  const { course, lessonCount, enrollmentCount, students, quizCount, analytics } =
+    loaderData;
   const statusFetcher = useFetcher();
   const reorderFetcher = useFetcher();
   const lessonReorderFetcher = useFetcher();
@@ -1192,6 +1560,10 @@ export default function InstructorCourseEditor({
           <TabsTrigger value="students">
             <Users className="size-4" />
             Students
+          </TabsTrigger>
+          <TabsTrigger value="analytics">
+            <BarChart3 className="size-4" />
+            Analytics
           </TabsTrigger>
         </TabsList>
 
@@ -1651,6 +2023,11 @@ export default function InstructorCourseEditor({
               </CardContent>
             </Card>
           )}
+        </TabsContent>
+
+        {/* Analytics Tab */}
+        <TabsContent value="analytics" className="mt-6">
+          <AnalyticsTab analytics={analytics} />
         </TabsContent>
       </Tabs>
     </div>
