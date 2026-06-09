@@ -1608,6 +1608,14 @@ You've completed the Building REST APIs course. You now have the skills to build
   addWatchEvent(students[3].id, course2LessonIds[0], "play", 150, 21);
   addWatchEvent(students[3].id, course2LessonIds[0], "pause", 360, 21);
 
+  // Admin Alex previews course 1 lesson 1 but is NOT enrolled. These events must
+  // never count toward the lesson's avg % watched — that metric is enrolee-scoped
+  // (see analyticsService.getDropOffFunnel). Emma + James (both enrolled) watch to
+  // the end, so the lesson reads 100% watched; if this preview leaked in it would
+  // drag the figure down.
+  addWatchEvent(admin.id, course1LessonIds[0], "play", 0, 8);
+  addWatchEvent(admin.id, course1LessonIds[0], "pause", 48, 8);
+
   console.log("Created video watch events.");
 
   // ─── Purchases ───
