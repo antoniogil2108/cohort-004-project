@@ -442,6 +442,24 @@ describe("analyticsService", () => {
       expect(refreshed.find((f) => f.lessonId === l2.id)!.reachPct).toBe(0);
     });
 
+    it("excludes non-enrolee watch events from avg % watched", () => {
+      const mod = addModule(base.course.id, 1);
+      const l1 = addLesson(mod.id, 1, 10); // duration known: 600s
+
+      const enrolee = addStudent();
+      enroll(enrolee.id, base.course.id);
+      addProgress(enrolee.id, l1.id, schema.LessonProgressStatus.InProgress);
+      addWatch(enrolee.id, l1.id, 600); // 100%
+
+      // An instructor/admin/unenrolled previewer watches a little — must not count.
+      const previewer = addStudent();
+      addWatch(previewer.id, l1.id, 60); // 10%
+
+      const funnel = getDropOffFunnel(base.course.id);
+
+      expect(funnel[0].avgPctWatched).toBe(100); // only the enrolee, not (100 + 10) / 2
+    });
+
     it("returns an empty array when the course has no lessons", () => {
       const s = addStudent();
       enroll(s.id, base.course.id);

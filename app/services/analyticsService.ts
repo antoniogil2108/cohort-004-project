@@ -72,12 +72,6 @@ function completedLessonCountsByEnrolee(
 // Trends cover the last 12 UTC months, or from the course's first month when
 // the course is younger. Buckets are zero-filled so empty months still render.
 
-function monthKey(d: Date): string {
-  const year = d.getUTCFullYear();
-  const month = String(d.getUTCMonth() + 1).padStart(2, "0");
-  return `${year}-${month}`;
-}
-
 function trendMonths(courseId: number): string[] {
   const now = new Date();
   const twelveMonthsAgo = new Date(
@@ -356,14 +350,22 @@ export function getDropOffFunnel(courseId: number): DropOffLesson[] {
     .all();
   const openersByLesson = new Map(reachRows.map((r) => [r.lessonId, r.openers]));
 
-  // Furthest watched position per viewer per lesson.
+  // Furthest watched position per viewer per lesson. Scoped to enrolees so
+  // instructor/admin/unenrolled previews don't skew the avg-%-watched figure,
+  // matching the enrolee-scoped reach metric above.
   const furthestRows = db
     .select({
       lessonId: videoWatchEvents.lessonId,
       furthest: sql<number>`max(${videoWatchEvents.positionSeconds})`,
     })
     .from(videoWatchEvents)
-    .where(inArray(videoWatchEvents.lessonId, lessonIds))
+    .innerJoin(enrollments, eq(enrollments.userId, videoWatchEvents.userId))
+    .where(
+      and(
+        eq(enrollments.courseId, courseId),
+        inArray(videoWatchEvents.lessonId, lessonIds)
+      )
+    )
     .groupBy(videoWatchEvents.lessonId, videoWatchEvents.userId)
     .all();
   const furthestByLesson = new Map<number, number[]>();
