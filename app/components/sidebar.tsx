@@ -11,6 +11,7 @@ import {
   Tag,
   Users,
   UsersRound,
+  BarChart3,
   Moon,
   Sun,
   LogOut,
@@ -82,6 +83,12 @@ const navItems: NavItem[] = [
     label: "Categories",
     to: "/admin/categories",
     icon: <Tag className="size-4" />,
+    roles: [UserRole.Admin],
+  },
+  {
+    label: "Analytics",
+    to: "/admin/analytics",
+    icon: <BarChart3 className="size-4" />,
     roles: [UserRole.Admin],
   },
 ];

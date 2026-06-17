@@ -14,6 +14,15 @@ export function formatPrice(cents: number | null | undefined): string {
   return `$${(cents / 100).toFixed(2)}`;
 }
 
+/**
+ * Format a money amount in cents as a currency string, always numeric.
+ * Unlike formatPrice, zero renders as "$0.00" (not "Free") — used for revenue
+ * totals where an empty platform should read as a real figure.
+ */
+export function formatCurrency(cents: number | null | undefined): string {
+  return `$${((cents ?? 0) / 100).toFixed(2)}`;
+}
+
 export function formatDuration(
   minutes: number,
   showHours: boolean,
