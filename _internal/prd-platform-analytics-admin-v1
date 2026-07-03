@@ -1,0 +1,93 @@
+## Problem Statement
+
+Admins of the Cadence platform have no single view of overall platform health. The only analytics that exist are scoped to an individual instructor's course (the per-course Analytics tab in the course editor). To understand how the platform as a whole is doing — total revenue, total reach, who the top-earning instructors are — an admin would have to visit each instructor's per-course analytics one at a time and add the numbers up by hand. There is no place that aggregates revenue and reach across all instructors and all courses.
+
+## Solution
+
+A new **Platform Analytics** page for admins at `/admin/analytics`, linked from the admin section of the sidebar alongside Manage Users / Manage Courses / Categories. It gives admins an at-a-glance, platform-wide snapshot:
+
+- A row of headline KPI cards: total revenue, total enrollments, published courses, instructor count, and platform-wide average rating.
+- A per-instructor revenue leaderboard: every course-owning instructor ranked by the revenue their courses have generated.
+
+Everything is all-time and read-only — a single page an admin can open to answer "how is the platform doing overall, and who's driving it?"
+
+## User Stories
+
+1. As an admin, I want a single platform-wide analytics page, so that I don't have to visit each instructor's per-course analytics and add numbers up by hand.
+2. As an admin, I want to reach this page from the admin section of the sidebar, so that it sits naturally alongside the other admin tools I already use.
+3. As an admin, I want the page to be admin-only, so that instructors and students can't see platform-wide financials.
+4. As an admin, I want to see total platform revenue across every course, so that I understand the platform's overall financial performance at a glance.
+5. As an admin, I want revenue to include sales from courses of any status (including archived and draft), so that archiving a course doesn't erase the money it historically earned from the platform total.
+6. As an admin, I want total revenue shown as a currency figure even when it is zero (e.g. "$0.00"), so that an empty platform reads as a real number rather than the word "Free".
+7. As an admin, I want to see the total number of enrollments across the whole platform, so that I understand total reach regardless of whether courses were paid or free.
+8. As an admin, I want to see how many published courses exist, so that I know the size of the live catalogue.
+9. As an admin, I want to see how many instructors there are, so that I understand the size of the creator base.
+10. As an admin, I want the instructor count to mean "people who actually own courses", so that the number lines up exactly with the rows in the leaderboard below it.
+11. As an admin, I want to see the platform-wide average course rating, so that I have a single quality signal for the whole platform.
+12. As an admin, I want the average rating to be review-weighted, so that a tiny course with one five-star review doesn't distort the platform figure.
+13. As an admin, I want a clear placeholder (e.g. "—") for average rating when there are no reviews yet, so that the card isn't misleading on a young platform.
+14. As an admin, I want a leaderboard of instructors ranked by revenue, so that I can immediately see who is driving the platform's earnings.
+15. As an admin, I want each instructor's revenue to be the sum across all the courses they own, so that the ranking reflects their total contribution.
+16. As an admin, I want team/bundle purchases counted at their full bundle price against the owning instructor, so that revenue attribution matches how purchases are actually recorded.
+17. As an admin, I want the leaderboard to list every course-owning instructor (not just a top N), so that I can audit the long tail, not only the top earners.
+18. As an admin, I want the leaderboard sorted by revenue descending with ties broken alphabetically by name, so that the ordering is stable and predictable.
+19. As an admin, I want instructors who own courses but have made no sales to still appear (with zero revenue), so that the leaderboard is a complete roster of creators.
+20. As an admin, I want a friendly empty state for the whole page when the platform has no courses at all, so that a brand-new platform doesn't show a wall of zeros.
+21. As an admin, I want the cards and leaderboard to degrade gracefully (zeros, "$0.00", "—", an empty leaderboard row) once at least one course exists, so that partial data still renders sensibly.
+22. As an admin, I want the page to load quickly regardless of how many courses or instructors exist, so that it stays usable as the platform grows.
+
+## Implementation Decisions
+
+**New route.** Add `/admin/analytics` as a new flat `admin.*` route (a sibling of the existing `admin/users`, `admin/courses`, `admin/categories` routes, inside the app layout). It reuses the standard admin gate the other admin routes use: 401 when there is no current user, 403 when the current user's role is not Admin. The route loader stays thin and delegates all computation to the service.
+
+**Sidebar.** Add a new "Analytics" item to the existing admin nav group in the sidebar (Admin-role-gated like the other admin items), with a chart-style icon.
+
+**New service module.** Add a new `adminAnalyticsService` (a separate module from the existing per-course `analyticsService`, which is entirely `courseId`-parameterised and has a different shape). It exposes platform-scoped, set-based aggregate functions — no per-course looping / N+1. Two functions:
+
+- `getPlatformTotals()` returns the five KPI numbers:
+  - total revenue = sum of `purchases.pricePaid` across all courses, all statuses;
+  - total enrollments = count of all enrollment rows, all statuses;
+  - published-course count = count of courses with status `published`;
+  - instructor count = count of **distinct `courses.instructorId`** (course owners);
+  - average rating = review-weighted average of `courseReviews.rating` across all reviews, or null when there are no reviews.
+- `getInstructorRevenueLeaderboard()` returns one row per distinct course owner — instructor name and total revenue (sum of `pricePaid` over courses they own) — built from a single `GROUP BY courses.instructorId` query, sorted by revenue descending then name ascending, including owners with zero revenue.
+
+**"Instructor" is defined by course ownership** (distinct `courses.instructorId`), consistently across both the KPI card and the leaderboard, so the card count equals the number of leaderboard rows. Role is not used to define an instructor here.
+
+**Course status handling.** Revenue, enrollments, and the leaderboard count courses of any status (historical truth). Only the "published courses" KPI card filters to status `published`.
+
+**Revenue formatting.** The total-revenue figure must be formatted as currency even when zero ("$0.00"), not via the existing price formatter that renders 0 as "Free".
+
+**Presentation.** Hand-rolled Tailwind using the existing KPI-card idiom from the instructor analytics tab and the existing table idiom from the admin Manage Courses / Manage Users pages. No new charting or table dependency. The leaderboard is a full, unpaginated table (matching the existing admin tables). Instructor names are plain text — there is no per-instructor page to link to.
+
+**No schema changes.** All data already exists (`purchases`, `enrollments`, `courses`, `courseReviews`, `users`).
+
+## Testing Decisions
+
+**What makes a good test here:** assert external behavior — the values returned by the service functions for a known seeded dataset — not implementation details (not the SQL, not query counts). Tests should seed a small, deliberately-composed dataset where the expected totals and ordering are obvious by inspection.
+
+**Seam.** Test at the service layer, the highest existing seam: the functions return plain serialisable data, so no route/HTTP layer is needed. The thin `admin.analytics` loader is left untested, consistent with the other `admin.*` routes (which have no loader tests).
+
+**Prior art.** Mirror `analyticsService.test.ts`: use `createTestDb` + `seedBaseData` from `~/test/setup`, mock `~/db` with the test db, import the service after the mock, and compose small local seed helpers per test so expected values stay obvious.
+
+**Modules under test:** the new `adminAnalyticsService`.
+
+- `getPlatformTotals()` — cases: revenue sums across statuses (a published, a draft, and an archived course all contribute revenue); the published-course count includes only published courses while revenue/enrollments include all; instructor count equals the number of distinct course owners; average rating is review-weighted (a high-volume course pulls the average more than a single-review course); average rating is null/placeholder when there are no reviews; an all-zero / empty platform.
+- `getInstructorRevenueLeaderboard()` — cases: revenue attributed via course ownership and summed across an instructor's multiple courses; a team/bundle purchase counted at full price against the owner; ordering by revenue descending with an alphabetical tie-break; an instructor who owns courses but has zero sales still appears with zero revenue.
+
+## Out of Scope
+
+- Monthly revenue and enrollment **trend charts** (the per-course analytics has these; deferred here to v2).
+- Any **date-range selector / windowed metrics** — v1 is all-time only.
+- **Per-course** and **per-category** leaderboards/breakdowns (the existing Manage Courses page already lists every course).
+- A **platform-wide completion rate** (averaging completion across courses of different lengths is statistically muddy; completion stays per-course on the instructor dashboard).
+- Extra leaderboard columns per instructor (course count, enrollments, average rating) and a "% of platform revenue" share.
+- Drop-off / engagement funnels (inherently per-course).
+- A dedicated per-instructor detail page.
+- Exporting / downloading the data.
+
+## Further Notes
+
+This is the admin counterpart to the existing per-course Instructor Analytics. The two share idioms (KPI cards, set-based aggregation, hand-rolled bars/tables) but are deliberately separate modules because their grain differs: instructor analytics is per-course (`courseId`-scoped) while this is platform-scoped.
+
+The design is intentionally lean for v1 — a headline KPI row plus a single revenue-ranked instructor leaderboard — chosen over a broader multi-section dashboard so the first version ships small and the deferred items (trends, date ranges, richer breakdowns) layer on cleanly later.
